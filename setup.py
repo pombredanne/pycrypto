@@ -39,6 +39,7 @@ __revision__ = "$Id$"
 from distutils import core
 from distutils.core import Extension, Command
 from distutils.command.build_ext import build_ext
+from distutils.errors import CCompilerError
 import os, sys
 import struct
 
@@ -156,11 +157,16 @@ class PCTBuildExt (build_ext):
         if self.compiler.compiler_type == 'msvc':
             self.compiler.include_dirs.insert(0, "src/inc-msvc/")
 
-        # Detect libgmp and don't build _fastmath if it is missing.
-        lib_dirs = self.compiler.library_dirs + ['/lib', '/usr/lib']
-        if not (self.compiler.find_library_file(lib_dirs, 'gmp')):
-            print >>sys.stderr, "warning: GMP library not found; Not building Crypto.PublicKey._fastmath."
-            self.__remove_extensions(["Crypto.PublicKey._fastmath"])
+    def build_extension(self, ext):
+        try:
+            return build_ext.build_extension(self, ext)
+        except CCompilerError, exc:
+            if ext.name == 'Crypto.PublicKey._fastmath':
+                print >>sys.stderr, "**"
+                print >>sys.stderr, "** warning: Unable to build Crypto.PublicKey._fastmath.  (Is the GMP library installed?)"
+                print >>sys.stderr, "**"
+                return
+            raise
 
     def __remove_extensions(self, names):
         """Remove the specified extension from the list of extensions to build"""
