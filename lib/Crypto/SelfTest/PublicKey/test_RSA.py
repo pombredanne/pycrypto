@@ -26,7 +26,11 @@
 
 __revision__ = "$Id$"
 
-from Crypto.Util.python_compat import *
+import sys
+import os
+if sys.version_info[0] == 2 and sys.version_info[1] == 1:
+    from Crypto.Util.py21compat import *
+from Crypto.Util.py3compat import *
 
 import unittest
 from Crypto.SelfTest.st_common import list_test_cases, a2b_hex, b2a_hex
@@ -116,6 +120,15 @@ class RSATest(unittest.TestCase):
         self._check_public_key(pub)
         self._exercise_public_primitive(rsaObj)
 
+    def test_generate_3args(self):
+        rsaObj = self.rsa.generate(1024, Random.new().read,e=65537)
+        self._check_private_key(rsaObj)
+        self._exercise_primitive(rsaObj)
+        pub = rsaObj.publickey()
+        self._check_public_key(pub)
+        self._exercise_public_primitive(rsaObj)
+        self.assertEqual(65537,rsaObj.e)
+
     def test_construct_2tuple(self):
         """RSA (default implementation) constructed key (2-tuple)"""
         pub = self.rsa.construct((self.n, self.e))
@@ -157,6 +170,14 @@ class RSATest(unittest.TestCase):
         self._check_signing(rsaObj)
         self._check_verification(rsaObj)
 
+    def test_factoring(self):
+        rsaObj = self.rsa.construct([self.n, self.e, self.d])
+        self.failUnless(rsaObj.p==self.p or rsaObj.p==self.q)
+        self.failUnless(rsaObj.q==self.p or rsaObj.q==self.q)
+        self.failUnless(rsaObj.q*rsaObj.p == self.n)
+
+        self.assertRaises(ValueError, self.rsa.construct, [self.n, self.e, self.n-1])
+
     def _check_private_key(self, rsaObj):
         # Check capabilities
         self.assertEqual(1, rsaObj.has_private())
@@ -173,7 +194,6 @@ class RSATest(unittest.TestCase):
         self.assertEqual(rsaObj.u, rsaObj.key.u)
 
         # Sanity check key data
-        self.assertEqual(1, rsaObj.p < rsaObj.q)            # p < q
         self.assertEqual(rsaObj.n, rsaObj.p * rsaObj.q)     # n = pq
         self.assertEqual(1, rsaObj.d * rsaObj.e % ((rsaObj.p-1) * (rsaObj.q-1))) # ed = 1 (mod (p-1)(q-1))
         self.assertEqual(1, rsaObj.p * rsaObj.u % rsaObj.q) # pu = 1 (mod q)
@@ -209,12 +229,12 @@ class RSATest(unittest.TestCase):
         self.assertEqual(1, rsaObj.e > 1)   # e > 1
 
         # Public keys should not be able to sign or decrypt
-        self.assertRaises(TypeError, rsaObj.sign, ciphertext, "")
+        self.assertRaises(TypeError, rsaObj.sign, ciphertext, b(""))
         self.assertRaises(TypeError, rsaObj.decrypt, ciphertext)
 
         # Check __eq__ and __ne__
-        self.assert_(rsaObj.publickey() == rsaObj.publickey())
-        self.assert_(not (rsaObj.publickey() != rsaObj.publickey()))
+        self.assertEqual(rsaObj.publickey() == rsaObj.publickey(),True) # assert_
+        self.assertEqual(rsaObj.publickey() != rsaObj.publickey(),False) # failIf
 
     def _exercise_primitive(self, rsaObj):
         # Since we're using a randomly-generated key, we can't check the test
@@ -226,7 +246,7 @@ class RSATest(unittest.TestCase):
         plaintext = rsaObj.decrypt((ciphertext,))
 
         # Test encryption (2 arguments)
-        (new_ciphertext2,) = rsaObj.encrypt(plaintext, "")
+        (new_ciphertext2,) = rsaObj.encrypt(plaintext, b(""))
         self.assertEqual(b2a_hex(ciphertext), b2a_hex(new_ciphertext2))
 
         # Test blinded decryption
@@ -237,7 +257,7 @@ class RSATest(unittest.TestCase):
         self.assertEqual(b2a_hex(plaintext), b2a_hex(unblinded_plaintext))
 
         # Test signing (2 arguments)
-        signature2 = rsaObj.sign(ciphertext, "")
+        signature2 = rsaObj.sign(ciphertext, b(""))
         self.assertEqual((bytes_to_long(plaintext),), signature2)
 
         # Test verification
@@ -247,7 +267,7 @@ class RSATest(unittest.TestCase):
         plaintext = a2b_hex(self.plaintext)
 
         # Test encryption (2 arguments)
-        (new_ciphertext2,) = rsaObj.encrypt(plaintext, "")
+        (new_ciphertext2,) = rsaObj.encrypt(plaintext, b(""))
 
         # Exercise verification
         rsaObj.verify(new_ciphertext2, (bytes_to_long(plaintext),))
@@ -257,7 +277,7 @@ class RSATest(unittest.TestCase):
         ciphertext = a2b_hex(self.ciphertext)
 
         # Test encryption (2 arguments)
-        (new_ciphertext2,) = rsaObj.encrypt(plaintext, "")
+        (new_ciphertext2,) = rsaObj.encrypt(plaintext, b(""))
         self.assertEqual(b2a_hex(ciphertext), b2a_hex(new_ciphertext2))
 
     def _check_decryption(self, rsaObj):
@@ -294,7 +314,7 @@ class RSATest(unittest.TestCase):
         message = a2b_hex(self.ciphertext)
 
         # Test signing (2 argument)
-        self.assertEqual((signature,), rsaObj.sign(message, ""))
+        self.assertEqual((signature,), rsaObj.sign(message, b("")))
 
 class RSAFastMathTest(RSATest):
     def setUp(self):
@@ -329,6 +349,9 @@ class RSAFastMathTest(RSATest):
         """RSA (_fastmath implementation) constructed key (6-tuple)"""
         RSATest.test_construct_6tuple(self)
 
+    def test_factoring(self):
+        RSATest.test_factoring(self)
+
 class RSASlowMathTest(RSATest):
     def setUp(self):
         RSATest.setUp(self)
@@ -362,6 +385,8 @@ class RSASlowMathTest(RSATest):
         """RSA (_slowmath implementation) constructed key (6-tuple)"""
         RSATest.test_construct_6tuple(self)
 
+    def test_factoring(self):
+        RSATest.test_factoring(self)
 
 def get_tests(config={}):
     tests = []
@@ -370,8 +395,16 @@ def get_tests(config={}):
         from Crypto.PublicKey import _fastmath
         tests += list_test_cases(RSAFastMathTest)
     except ImportError:
-        pass
-    if config.get('slow_tests',1): 
+        from distutils.sysconfig import get_config_var
+        import inspect
+        _fm_path = os.path.normpath(os.path.dirname(os.path.abspath(
+            inspect.getfile(inspect.currentframe())))
+            +"/../../PublicKey/_fastmath"+get_config_var("SO"))
+        if os.path.exists(_fm_path):
+            raise ImportError("While the _fastmath module exists, importing "+
+                "it failed. This may point to the gmp or mpir shared library "+
+                "not being in the path. _fastmath was found at "+_fm_path)
+    if config.get('slow_tests',1):
         tests += list_test_cases(RSASlowMathTest)
     return tests
 

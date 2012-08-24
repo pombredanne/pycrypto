@@ -29,6 +29,7 @@ __revision__ = "$Id$"
 import sys
 import unittest
 from binascii import a2b_hex, b2a_hex
+from Crypto.Util.py3compat import *
 
 # For compatibility with Python 2.1 and Python 2.2
 if sys.hexversion < 0x02030000:
@@ -37,7 +38,7 @@ if sys.hexversion < 0x02030000:
     def dict(**kwargs):
         return kwargs.copy()
 else:
-    dict = __builtins__['dict']
+    dict = dict
 
 class _NoDefault: pass        # sentinel object
 def _extract(d, k, default=_NoDefault):
@@ -61,9 +62,9 @@ class CipherSelfTest(unittest.TestCase):
         # Extract the parameters
         params = params.copy()
         self.description = _extract(params, 'description')
-        self.key = _extract(params, 'key')
-        self.plaintext = _extract(params, 'plaintext')
-        self.ciphertext = _extract(params, 'ciphertext')
+        self.key = b(_extract(params, 'key'))
+        self.plaintext = b(_extract(params, 'plaintext'))
+        self.ciphertext = b(_extract(params, 'ciphertext'))
         self.module_name = _extract(params, 'module_name', None)
 
         mode = _extract(params, 'mode', None)
@@ -72,6 +73,12 @@ class CipherSelfTest(unittest.TestCase):
             # Block cipher
             self.mode = getattr(self.module, "MODE_" + mode)
             self.iv = _extract(params, 'iv', None)
+            if self.iv is not None: self.iv = b(self.iv)
+
+            # Only relevant for OPENPGP mode
+            self.encrypted_iv = _extract(params, 'encrypted_iv', None)
+            if self.encrypted_iv is not None:
+                self.encrypted_iv = b(self.encrypted_iv)
         else:
             # Stream cipher
             self.mode = None
@@ -82,7 +89,7 @@ class CipherSelfTest(unittest.TestCase):
     def shortDescription(self):
         return self.description
 
-    def _new(self):
+    def _new(self, do_decryption=0):
         params = self.extra_params.copy()
 
         # Handle CTR mode parameters.  By default, we use Counter.new(self.module.block_size)
@@ -90,8 +97,8 @@ class CipherSelfTest(unittest.TestCase):
             from Crypto.Util import Counter
             ctr_class = _extract(params, 'ctr_class', Counter.new)
             ctr_params = _extract(params, 'ctr_params', {}).copy()
-            if ctr_params.has_key('prefix'): ctr_params['prefix'] = a2b_hex(ctr_params['prefix'])
-            if ctr_params.has_key('suffix'): ctr_params['suffix'] = a2b_hex(ctr_params['suffix'])
+            if ctr_params.has_key('prefix'): ctr_params['prefix'] = a2b_hex(b(ctr_params['prefix']))
+            if ctr_params.has_key('suffix'): ctr_params['suffix'] = a2b_hex(b(ctr_params['suffix']))
             if not ctr_params.has_key('nbits'):
                 ctr_params['nbits'] = 8*(self.module.block_size - len(ctr_params.get('prefix', '')) - len(ctr_params.get('suffix', '')))
             params['counter'] = ctr_class(**ctr_params)
@@ -104,16 +111,30 @@ class CipherSelfTest(unittest.TestCase):
             return self.module.new(a2b_hex(self.key), self.mode, **params)
         else:
             # Block cipher with iv
-            return self.module.new(a2b_hex(self.key), self.mode, a2b_hex(self.iv), **params)
+            if do_decryption and self.mode == self.module.MODE_OPENPGP:
+                # In PGP mode, the IV to feed for decryption is the *encrypted* one
+                return self.module.new(a2b_hex(self.key), self.mode, a2b_hex(self.encrypted_iv), **params)
+            else:
+                return self.module.new(a2b_hex(self.key), self.mode, a2b_hex(self.iv), **params)
 
     def runTest(self):
         plaintext = a2b_hex(self.plaintext)
         ciphertext = a2b_hex(self.ciphertext)
 
         ct1 = b2a_hex(self._new().encrypt(plaintext))
-        pt1 = b2a_hex(self._new().decrypt(ciphertext))
+        pt1 = b2a_hex(self._new(1).decrypt(ciphertext))
         ct2 = b2a_hex(self._new().encrypt(plaintext))
-        pt2 = b2a_hex(self._new().decrypt(ciphertext))
+        pt2 = b2a_hex(self._new(1).decrypt(ciphertext))
+
+        if hasattr(self.module, "MODE_OPENPGP") and self.mode == self.module.MODE_OPENPGP:
+            # In PGP mode, data returned by the first encrypt()
+            # is prefixed with the encrypted IV.
+            # Here we check it and then remove it from the ciphertexts.
+            eilen = len(self.encrypted_iv)
+            self.assertEqual(self.encrypted_iv, ct1[:eilen])
+            self.assertEqual(self.encrypted_iv, ct2[:eilen])
+            ct1 = ct1[eilen:]
+            ct2 = ct2[eilen:]
 
         self.assertEqual(self.ciphertext, ct1)  # encrypt
         self.assertEqual(self.ciphertext, ct2)  # encrypt (second time)
@@ -139,7 +160,7 @@ class CipherStreamingSelfTest(CipherSelfTest):
         cipher = self._new()
         for i in range(0, len(plaintext), 3):
             ct3.append(cipher.encrypt(plaintext[i:i+3]))
-        ct3 = b2a_hex("".join(ct3))
+        ct3 = b2a_hex(b("").join(ct3))
         self.assertEqual(self.ciphertext, ct3)  # encryption (3 bytes at a time)
 
         # Test counter mode decryption, 3 bytes at a time
@@ -147,7 +168,8 @@ class CipherStreamingSelfTest(CipherSelfTest):
         cipher = self._new()
         for i in range(0, len(ciphertext), 3):
             pt3.append(cipher.encrypt(ciphertext[i:i+3]))
-        pt3 = b2a_hex("".join(pt3))
+        # PY3K: This is meant to be text, do not change to bytes (data)
+        pt3 = b2a_hex(b("").join(pt3))
         self.assertEqual(self.plaintext, pt3)  # decryption (3 bytes at a time)
 
 class CTRSegfaultTest(unittest.TestCase):
@@ -155,7 +177,7 @@ class CTRSegfaultTest(unittest.TestCase):
     def __init__(self, module, params):
         unittest.TestCase.__init__(self)
         self.module = module
-        self.key = params['key']
+        self.key = b(params['key'])
         self.module_name = params.get('module_name', None)
 
     def shortDescription(self):
@@ -169,7 +191,7 @@ class CTRWraparoundTest(unittest.TestCase):
     def __init__(self, module, params):
         unittest.TestCase.__init__(self)
         self.module = module
-        self.key = params['key']
+        self.key = b(params['key'])
         self.module_name = params.get('module_name', None)
 
     def shortDescription(self):
@@ -182,7 +204,7 @@ class CTRWraparoundTest(unittest.TestCase):
             for little_endian in (0, 1): # (False, True) Test both endiannesses
                 ctr = Counter.new(8*self.module.block_size, initial_value=2L**(8*self.module.block_size)-1, little_endian=little_endian, disable_shortcut=disable_shortcut)
                 cipher = self.module.new(a2b_hex(self.key), self.module.MODE_CTR, counter=ctr)
-                block = "\x00" * self.module.block_size
+                block = b("\x00") * self.module.block_size
                 cipher.encrypt(block)
                 self.assertRaises(OverflowError, cipher.encrypt, block)
 
@@ -191,7 +213,7 @@ class CFBSegmentSizeTest(unittest.TestCase):
     def __init__(self, module, params):
         unittest.TestCase.__init__(self)
         self.module = module
-        self.key = params['key']
+        self.key = b(params['key'])
         self.description = params['description']
 
     def shortDescription(self):
@@ -201,29 +223,71 @@ class CFBSegmentSizeTest(unittest.TestCase):
         """Regression test: m.new(key, m.MODE_CFB, segment_size=N) should require segment_size to be a multiple of 8 bits"""
         for i in range(1, 8):
             self.assertRaises(ValueError, self.module.new, a2b_hex(self.key), self.module.MODE_CFB, segment_size=i)
-        self.module.new(a2b_hex(self.key), self.module.MODE_CFB, segment_size=8) # should succeed
+        self.module.new(a2b_hex(self.key), self.module.MODE_CFB, "\0"*self.module.block_size, segment_size=8) # should succeed
 
 class RoundtripTest(unittest.TestCase):
-
     def __init__(self, module, params):
         from Crypto import Random
         unittest.TestCase.__init__(self)
         self.module = module
         self.iv = Random.get_random_bytes(module.block_size)
-        self.key = params['key']
-        self.plaintext = 100 * params['plaintext']
+        self.key = b(params['key'])
+        self.plaintext = 100 * b(params['plaintext'])
         self.module_name = params.get('module_name', None)
 
     def shortDescription(self):
         return """%s .decrypt() output of .encrypt() should not be garbled""" % (self.module_name,)
 
     def runTest(self):
-        for mode in (self.module.MODE_ECB, self.module.MODE_CBC, self.module.MODE_CFB, self.module.MODE_PGP, self.module.MODE_OFB):
+        for mode in (self.module.MODE_ECB, self.module.MODE_CBC, self.module.MODE_CFB, self.module.MODE_OFB, self.module.MODE_OPENPGP):
             encryption_cipher = self.module.new(a2b_hex(self.key), mode, self.iv)
-            decryption_cipher = self.module.new(a2b_hex(self.key), mode, self.iv)
             ciphertext = encryption_cipher.encrypt(self.plaintext)
+            
+            if mode != self.module.MODE_OPENPGP:
+                decryption_cipher = self.module.new(a2b_hex(self.key), mode, self.iv)
+            else:
+                eiv = ciphertext[:self.module.block_size+2]
+                ciphertext = ciphertext[self.module.block_size+2:]
+                decryption_cipher = self.module.new(a2b_hex(self.key), mode, eiv)
             decrypted_plaintext = decryption_cipher.decrypt(ciphertext)
             self.assertEqual(self.plaintext, decrypted_plaintext)
+
+class PGPTest(unittest.TestCase):
+    def __init__(self, module, params):
+        unittest.TestCase.__init__(self)
+        self.module = module
+        self.key = b(params['key'])
+
+    def shortDescription(self):
+        return "MODE_PGP was implemented incorrectly and insecurely. It's completely banished now."
+
+    def runTest(self):
+        self.assertRaises(ValueError, self.module.new, a2b_hex(self.key),
+                self.module.MODE_PGP)
+
+class IVLengthTest(unittest.TestCase):
+    def __init__(self, module, params):
+        unittest.TestCase.__init__(self)
+        self.module = module
+        self.key = b(params['key'])
+
+    def shortDescription(self):
+        return "Check that all modes except MODE_ECB and MODE_CTR require an IV of the proper length"
+
+    def runTest(self):
+        self.assertRaises(ValueError, self.module.new, a2b_hex(self.key),
+                self.module.MODE_CBC, "")
+        self.assertRaises(ValueError, self.module.new, a2b_hex(self.key),
+                self.module.MODE_CFB, "")
+        self.assertRaises(ValueError, self.module.new, a2b_hex(self.key),
+                self.module.MODE_OFB, "")
+        self.assertRaises(ValueError, self.module.new, a2b_hex(self.key),
+                self.module.MODE_OPENPGP, "")
+        self.module.new(a2b_hex(self.key), self.module.MODE_ECB, "")
+        self.module.new(a2b_hex(self.key), self.module.MODE_CTR, "", counter=self._dummy_counter)
+
+    def _dummy_counter(self):
+        return "\0" * self.module.block_size
 
 def make_block_tests(module, module_name, test_data):
     tests = []
@@ -270,6 +334,8 @@ def make_block_tests(module, module_name, test_data):
                 CTRWraparoundTest(module, params),
                 CFBSegmentSizeTest(module, params),
                 RoundtripTest(module, params),
+                PGPTest(module, params),
+                IVLengthTest(module, params),
             ]
             extra_tests_added = 1
 

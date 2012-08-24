@@ -26,6 +26,8 @@
 
 __revision__ = "$Id$"
 
+from Crypto.Util.py3compat import *
+
 # Test vectors from various sources
 # This is a list of (expected_result, input[, description]) tuples.
 test_data = [
@@ -43,14 +45,16 @@ test_data = [
 
     # RFC 3174: Section 7.3, "TEST4" (multiple of 512 bits)
     ('dea356a2cddd90c7a7ecedc5ebb563934f460452',
-        "01234567" * 80,
+        '01234567' * 80,
         '"01234567" * 80'),
 ]
 
 def get_tests(config={}):
     from Crypto.Hash import SHA
     from common import make_hash_tests
-    return make_hash_tests(SHA, "SHA", test_data)
+    return make_hash_tests(SHA, "SHA", test_data,
+        digest_size=20,
+        oid="\x06\x05\x2B\x0E\x03\x02\x1A")
 
 if __name__ == '__main__':
     import unittest

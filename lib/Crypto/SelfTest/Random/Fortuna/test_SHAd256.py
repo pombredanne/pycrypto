@@ -25,6 +25,7 @@
 """Self-test suite for Crypto.Random.Fortuna.SHAd256"""
 
 __revision__ = "$Id$"
+from Crypto.Util.py3compat import *
 
 # This is a list of (expected_result, input[, description]) tuples.
 test_data = [
@@ -44,7 +45,7 @@ test_data = [
 def get_tests(config={}):
     from Crypto.Random.Fortuna import SHAd256
     from Crypto.SelfTest.Hash.common import make_hash_tests
-    return make_hash_tests(SHAd256, "SHAd256", test_data)
+    return make_hash_tests(SHAd256, "SHAd256", test_data, 32)
 
 if __name__ == '__main__':
     import unittest

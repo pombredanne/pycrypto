@@ -26,6 +26,8 @@
 
 __revision__ = "$Id$"
 
+from Crypto.Util.py3compat import *
+
 # This is a list of (expected_result, input[, description]) tuples.
 test_data = [
     # Test vectors from RFC 1321
@@ -50,7 +52,9 @@ test_data = [
 def get_tests(config={}):
     from Crypto.Hash import MD5
     from common import make_hash_tests
-    return make_hash_tests(MD5, "MD5", test_data)
+    return make_hash_tests(MD5, "MD5", test_data,
+        digest_size=16,
+        oid="\x06\x08\x2a\x86\x48\x86\xf7\x0d\x02\x05")
 
 if __name__ == '__main__':
     import unittest

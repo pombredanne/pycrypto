@@ -34,6 +34,7 @@
 #endif
 
 #include "Python.h"
+#include "pycrypto_compat.h"
 #include "modsupport.h" 
 
 #include "_counter.h"
@@ -51,7 +52,11 @@
 #define _XSTR(x) _STR(x)
 #define _PASTE(x,y) x##y
 #define _PASTE2(x,y) _PASTE(x,y)
+#ifdef IS_PY3K
+#define _MODULE_NAME _PASTE2(PyInit_,MODULE_NAME)
+#else
 #define _MODULE_NAME _PASTE2(init,MODULE_NAME)
+#endif
 #define _MODULE_STRING _XSTR(MODULE_NAME)
 
 typedef struct 
@@ -64,9 +69,17 @@ typedef struct
 	block_state st;
 } ALGobject;
 
+/* Please see PEP3123 for a discussion of PyObject_HEAD and changes made in 3.x to make it conform to Standard C.
+ * These changes also dictate using Py_TYPE to check type, and PyVarObject_HEAD_INIT(NULL, 0) to initialize
+ */
+#ifdef IS_PY3K
+static PyTypeObject ALGtype;
+#define is_ALGobject(v)		(Py_TYPE(v) == &ALGtype)
+#else
 staticforward PyTypeObject ALGtype;
-
 #define is_ALGobject(v)		((v)->ob_type == &ALGtype)
+#define PyLong_FromLong PyInt_FromLong /* For Python 2.x */
+#endif
 
 static ALGobject *
 newALGobject(void)
@@ -93,6 +106,7 @@ ALGdealloc(PyObject *ptr)
 	self->mode = self->count = self->segment_size = 0;
 	PyObject_Del(ptr);
 }
+
 
 
 static char ALGnew__doc__[] = 
@@ -131,30 +145,35 @@ ALGnew(PyObject *self, PyObject *args, PyObject *kwdict)
 		return NULL;
 	}
 
-	if (KEY_SIZE!=0 && keylen!=KEY_SIZE)
+	if (mode<MODE_ECB || mode>MODE_CTR) 
 	{
 		PyErr_Format(PyExc_ValueError, 
+			     "Unknown cipher feedback mode %i",
+			     mode);
+		return NULL;
+	}
+	if (mode == MODE_PGP) {
+		PyErr_Format(PyExc_ValueError, 
+			     "MODE_PGP is not supported anymore");
+		return NULL;
+	}
+	if (KEY_SIZE!=0 && keylen!=KEY_SIZE)
+	{
+		PyErr_Format(PyExc_ValueError,
 			     "Key must be %i bytes long, not %i",
 			     KEY_SIZE, keylen);
 		return NULL;
 	}
 	if (KEY_SIZE==0 && keylen==0)
 	{
-		PyErr_SetString(PyExc_ValueError, 
+		PyErr_SetString(PyExc_ValueError,
 				"Key cannot be the null string");
 		return NULL;
 	}
-	if (IVlen != BLOCK_SIZE && IVlen != 0)
+	if (IVlen != BLOCK_SIZE && mode != MODE_ECB && mode != MODE_CTR)
 	{
-		PyErr_Format(PyExc_ValueError, 
+		PyErr_Format(PyExc_ValueError,
 			     "IV must be %i bytes long", BLOCK_SIZE);
-		return NULL;
-	}
-	if (mode<MODE_ECB || mode>MODE_CTR) 
-	{
-		PyErr_Format(PyExc_ValueError, 
-			     "Unknown cipher feedback mode %i",
-			     mode);
 		return NULL;
 	}
 
@@ -168,13 +187,16 @@ ALGnew(PyObject *self, PyObject *args, PyObject *kwdict)
 			return NULL;
 		}
 	}
-
 	if (mode == MODE_CTR) {
 		if (counter == NULL) {
 			PyErr_SetString(PyExc_TypeError,
 					"'counter' keyword parameter is required with CTR mode");
 			return NULL;
+#ifdef IS_PY3K
+		} else if (PyObject_HasAttr(counter, PyUnicode_FromString("__PCT_CTR_SHORTCUT__"))) {
+#else
 		} else if (PyObject_HasAttrString(counter, "__PCT_CTR_SHORTCUT__")) {
+#endif
 			counter_shortcut = 1;
 		} else if (!PyCallable_Check(counter)) {
 			PyErr_SetString(PyExc_ValueError, 
@@ -219,14 +241,7 @@ ALGnew(PyObject *self, PyObject *args, PyObject *kwdict)
 	memset(new->oldCipher, 0, BLOCK_SIZE);
 	memcpy(new->IV, IV, IVlen);
 	new->mode = mode;
-	switch(mode) {
-	case MODE_PGP:
-	    new->count=8;
-	    break;
-	case MODE_CTR:
-	default:
-	    new->count=BLOCK_SIZE;   /* stores how many bytes in new->oldCipher have been used */
-	}
+	new->count=BLOCK_SIZE;   /* stores how many bytes in new->oldCipher have been used */
 	return new;
 }
 
@@ -245,10 +260,10 @@ ALG_Encrypt(ALGobject *self, PyObject *args)
 		return NULL;
 	if (len==0)			/* Handle empty string */
 	{
-		return PyString_FromStringAndSize(NULL, 0);
+		return PyBytes_FromStringAndSize(NULL, 0);
 	}
 	if ( (len % BLOCK_SIZE) !=0 && 
-	     (self->mode!=MODE_CFB) && (self->mode!=MODE_PGP) &&
+	     (self->mode!=MODE_CFB) &&
 	     (self->mode!=MODE_CTR))
 	{
 		PyErr_Format(PyExc_ValueError, 
@@ -318,37 +333,6 @@ ALG_Encrypt(ALGobject *self, PyObject *args)
 			else {
 				/* segment_size is not a multiple of 8; 
 				   currently this can't happen */
-			}
-		}
-		break;
-
-	case(MODE_PGP):
-		if (len<=BLOCK_SIZE-self->count) 
-		{			
-			/* If less than one block, XOR it in */
-			for(i=0; i<len; i++) 
-				buffer[i] = self->IV[self->count+i] ^= str[i];
-			self->count += len;
-		}
-		else 
-		{
-			int j;
-			for(i=0; i<BLOCK_SIZE-self->count; i++) 
-				buffer[i] = self->IV[self->count+i] ^= str[i];
-			self->count=0;
-			for(; i<len-BLOCK_SIZE; i+=BLOCK_SIZE) 
-			{
-				block_encrypt(&(self->st), self->oldCipher, 
-					      self->IV);
-				for(j=0; j<BLOCK_SIZE; j++)
-					buffer[i+j] = self->IV[j] ^= str[i+j];
-			}
-			/* Do the remaining 1 to BLOCK_SIZE bytes */
-			block_encrypt(&(self->st), self->oldCipher, self->IV);
-			self->count=len-i;
-			for(j=0; j<len-i; j++) 
-			{
-				buffer[i+j] = self->IV[j] ^= str[i+j];
 			}
 		}
 		break;
@@ -437,25 +421,33 @@ ALG_Encrypt(ALGobject *self, PyObject *args)
 					free(buffer);
 					return NULL;
 				}
-				if (!PyString_Check(ctr))
+				if (!PyBytes_Check(ctr))
 				{
 					PyErr_SetString(PyExc_TypeError,
+#ifdef IS_PY3K
+							"CTR counter function didn't return bytes");
+#else
 							"CTR counter function didn't return a string");
+#endif
 					Py_DECREF(ctr);
 					free(buffer);
 					return NULL;
 				}
-				if (PyString_Size(ctr) != BLOCK_SIZE) {
+				if (PyBytes_Size(ctr) != BLOCK_SIZE) {
 					PyErr_Format(PyExc_TypeError,
 						     "CTR counter function returned "
+#ifdef IS_PY3K
+						     "bytes not of length %i",
+#else
 						     "string not of length %i",
+#endif
 						     BLOCK_SIZE);
 					Py_DECREF(ctr);
 					free(buffer);
 					return NULL;
 				}
 				Py_UNBLOCK_THREADS;
-				block_encrypt(&(self->st), (unsigned char *)PyString_AsString(ctr),
+				block_encrypt(&(self->st), (unsigned char *)PyBytes_AsString(ctr),
 					      self->IV);
 				Py_BLOCK_THREADS;
 				Py_DECREF(ctr);
@@ -477,13 +469,15 @@ ALG_Encrypt(ALGobject *self, PyObject *args)
 		return NULL;
 	}
 	Py_END_ALLOW_THREADS;
-	result=PyString_FromStringAndSize((char *) buffer, len);
+	result=PyBytes_FromStringAndSize((char *) buffer, len);
 	free(buffer);
 	return(result);
 }
 
 static char ALG_Decrypt__doc__[] =
 "decrypt(string): Decrypt the provided string of binary data.";
+
+
 
 
 static PyObject *
@@ -502,10 +496,9 @@ ALG_Decrypt(ALGobject *self, PyObject *args)
 		return NULL;
 	if (len==0)			/* Handle empty string */
 	{
-		return PyString_FromStringAndSize(NULL, 0);
+		return PyBytes_FromStringAndSize(NULL, 0);
 	}
-	if ( (len % BLOCK_SIZE) !=0 && 
-	     (self->mode!=MODE_CFB && self->mode!=MODE_PGP))
+	if ( (len % BLOCK_SIZE) !=0 && (self->mode!=MODE_CFB))
 	{
 		PyErr_Format(PyExc_ValueError, 
 			     "Input strings must be "
@@ -578,48 +571,6 @@ ALG_Decrypt(ALGobject *self, PyObject *args)
 		}
 		break;
 
-	case(MODE_PGP):
-		if (len<=BLOCK_SIZE-self->count) 
-		{			
-                        /* If less than one block, XOR it in */
-			unsigned char t;
-			for(i=0; i<len; i++)
-			{
-				t=self->IV[self->count+i];
-				buffer[i] = t ^ (self->IV[self->count+i] = str[i]);
-			}
-			self->count += len;
-		}
-		else 
-		{
-			int j;
-			unsigned char t;
-			for(i=0; i<BLOCK_SIZE-self->count; i++) 
-			{
-				t=self->IV[self->count+i];
-				buffer[i] = t ^ (self->IV[self->count+i] = str[i]);
-			}
-			self->count=0;
-			for(; i<len-BLOCK_SIZE; i+=BLOCK_SIZE) 
-			{
-				block_encrypt(&(self->st), self->oldCipher, self->IV);
-				for(j=0; j<BLOCK_SIZE; j++)
-				{
-					t=self->IV[j];
-					buffer[i+j] = t ^ (self->IV[j] = str[i+j]);
-				}
-			}
-			/* Do the remaining 1 to BLOCK_SIZE bytes */
-			block_encrypt(&(self->st), self->oldCipher, self->IV);
-			self->count=len-i;
-			for(j=0; j<len-i; j++) 
-			{
-				t=self->IV[j];
-				buffer[i+j] = t ^ (self->IV[j] = str[i+j]);
-			}
-		}
-		break;
-
 	case (MODE_OFB):
 		for(i=0; i<len; i+=BLOCK_SIZE) 
 		{
@@ -642,67 +593,23 @@ ALG_Decrypt(ALGobject *self, PyObject *args)
 		return NULL;
 	}
 	Py_END_ALLOW_THREADS;
-	result=PyString_FromStringAndSize((char *) buffer, len);
+	result=PyBytes_FromStringAndSize((char *) buffer, len);
 	free(buffer);
 	return(result);
 }
 
-static char ALG_Sync__doc__[] =
-"sync(): For objects using the PGP feedback mode, this method modifies "
-"the IV, synchronizing it with the preceding ciphertext.";
-
-static PyObject *
-ALG_Sync(ALGobject *self, PyObject *args)
-{
-	if (!PyArg_ParseTuple(args, "")) {
-		return NULL;
-	}
-
-	if (self->mode!=MODE_PGP) 
-	{
-		PyErr_SetString(PyExc_SystemError, "sync() operation not defined for "
-				"this feedback mode");
-		return NULL;
-	}
-	
-	if (self->count!=8) 
-	{
-		memmove(self->IV+BLOCK_SIZE-self->count, self->IV, 
-			self->count);
-		memcpy(self->IV, self->oldCipher+self->count, 
-		       BLOCK_SIZE-self->count);
-		self->count=8;
-	}
-	Py_INCREF(Py_None);
-	return Py_None;
-}
-
-#if 0
-void PrintState(self, msg)
-     ALGobject *self;
-     char * msg;
-{
-  int count;
-  
-  printf("%sing: %i IV ", msg, (int)self->count);
-  for(count=0; count<8; count++) printf("%i ", self->IV[count]);
-  printf("\noldCipher:");
-  for(count=0; count<8; count++) printf("%i ", self->oldCipher[count]);
-  printf("\n");
-}
-#endif
-
-
 /* ALG object methods */
-
 static PyMethodDef ALGmethods[] =
 {
+#ifdef IS_PY3K
+ {"encrypt", (PyCFunction) ALG_Encrypt, METH_O, ALG_Encrypt__doc__},
+ {"decrypt", (PyCFunction) ALG_Decrypt, METH_O, ALG_Decrypt__doc__},
+#else
  {"encrypt", (PyCFunction) ALG_Encrypt, 0, ALG_Encrypt__doc__},
  {"decrypt", (PyCFunction) ALG_Decrypt, 0, ALG_Decrypt__doc__},
- {"sync", (PyCFunction) ALG_Sync, METH_VARARGS, ALG_Sync__doc__},
+#endif
  {NULL, NULL}			/* sentinel */
 };
-
 
 static int
 ALGsetattr(PyObject *ptr, char *name, PyObject *v)
@@ -721,44 +628,77 @@ ALGsetattr(PyObject *ptr, char *name, PyObject *v)
 		      "Can't delete IV attribute of block cipher object");
       return -1;
     }
-  if (!PyString_Check(v))
+  if (!PyBytes_Check(v))
     {
       PyErr_SetString(PyExc_TypeError,
+#ifdef IS_PY3K
+			  "IV attribute of block cipher object must be bytes");
+#else
 		      "IV attribute of block cipher object must be string");
+#endif
       return -1;
     }
-  if (PyString_Size(v)!=BLOCK_SIZE) 
+  if (PyBytes_Size(v)!=BLOCK_SIZE) 
     {
       PyErr_Format(PyExc_ValueError, 
 		   _MODULE_STRING " IV must be %i bytes long",
 		   BLOCK_SIZE);
       return -1;
     }
-  memcpy(self->IV, PyString_AsString(v), BLOCK_SIZE);
+  memcpy(self->IV, PyBytes_AsString(v), BLOCK_SIZE);
   return 0;
 }
 
 static PyObject *
+#ifdef IS_PY3K
+ALGgetattro(PyObject *s, PyObject *attr)
+#else
 ALGgetattr(PyObject *s, char *name)
+#endif
 {
   ALGobject *self = (ALGobject*)s;
+
+#ifdef IS_PY3K
+  if (!PyUnicode_Check(attr))
+	goto generic;
+
+  if (PyUnicode_CompareWithASCIIString(attr, "IV") == 0)
+#else
   if (strcmp(name, "IV") == 0) 
+#endif
     {
-      return(PyString_FromStringAndSize((char *) self->IV, BLOCK_SIZE));
+      return(PyBytes_FromStringAndSize((char *) self->IV, BLOCK_SIZE));
     }
+#ifdef IS_PY3K
+  if (PyUnicode_CompareWithASCIIString(attr, "mode") == 0)
+#else
   if (strcmp(name, "mode") == 0)
+#endif
      {
-       return(PyInt_FromLong((long)(self->mode)));
+       return(PyLong_FromLong((long)(self->mode)));
      }
+#ifdef IS_PY3K
+  if (PyUnicode_CompareWithASCIIString(attr, "block_size") == 0)
+#else
   if (strcmp(name, "block_size") == 0)
+#endif
      {
-       return PyInt_FromLong(BLOCK_SIZE);
+       return PyLong_FromLong(BLOCK_SIZE);
      }
+#ifdef IS_PY3K
+  if (PyUnicode_CompareWithASCIIString(attr, "key_size") == 0)
+#else
   if (strcmp(name, "key_size") == 0)
+#endif
      {
-       return PyInt_FromLong(KEY_SIZE);
+       return PyLong_FromLong(KEY_SIZE);
      }
- return Py_FindMethod(ALGmethods, (PyObject *) self, name);
+#ifdef IS_PY3K
+  generic:
+	return PyObject_GenericGetAttr(s, attr);
+#else
+	return Py_FindMethod(ALGmethods, (PyObject *) self, name);
+#endif
 }
 
 /* List of functions defined in the module */
@@ -771,43 +711,100 @@ static struct PyMethodDef modulemethods[] =
 
 static PyTypeObject ALGtype =
 {
+#ifdef IS_PY3K
+	PyVarObject_HEAD_INIT(NULL, 0)  /* deferred type init for compilation on Windows, type will be filled in at runtime */
+#else
 	PyObject_HEAD_INIT(NULL)
 	0,				/*ob_size*/
+#endif
 	_MODULE_STRING,		/*tp_name*/
 	sizeof(ALGobject),	/*tp_size*/
 	0,				/*tp_itemsize*/
 	/* methods */
-	ALGdealloc,	/*tp_dealloc*/
+	(destructor) ALGdealloc,	/*tp_dealloc*/
 	0,				/*tp_print*/
-	ALGgetattr,	/*tp_getattr*/
+#ifdef IS_PY3K
+	0,				/*tp_getattr*/
+#else
+	ALGgetattr,		/*tp_getattr*/
+#endif
 	ALGsetattr,    /*tp_setattr*/
 	0,			/*tp_compare*/
-	(reprfunc) 0,			/*tp_repr*/
+	(reprfunc) 0,				/*tp_repr*/
 	0,				/*tp_as_number*/
+#ifdef IS_PY3K
+	0,				/*tp_as_sequence */
+	0,				/*tp_as_mapping */
+	0,				/*tp_hash*/
+	0,				/*tp_call*/
+	0,				/*tp_str*/
+	ALGgetattro,	/*tp_getattro*/
+	0,				/*tp_setattro*/
+	0,				/*tp_as_buffer*/
+	Py_TPFLAGS_DEFAULT,		/*tp_flags*/
+	0,				/*tp_doc*/
+	0,				/*tp_traverse*/
+	0,				/*tp_clear*/
+	0,				/*tp_richcompare*/
+	0,				/*tp_weaklistoffset*/
+	0,				/*tp_iter*/
+	0,				/*tp_iternext*/
+	ALGmethods,		/*tp_methods*/
+#endif
 };
+
+#ifdef IS_PY3K
+static struct PyModuleDef moduledef = {
+	PyModuleDef_HEAD_INIT,
+	"Crypto.Cipher." _MODULE_STRING,
+	NULL,
+	-1,
+	modulemethods,
+	NULL,
+	NULL,
+	NULL,
+	NULL
+};
+#endif
 
 /* Initialization function for the module */
 
+/* Deal with old API in Python 2.1 */
 #if PYTHON_API_VERSION < 1011
 #define PyModule_AddIntConstant(m,n,v) {PyObject *o=PyInt_FromLong(v); \
            if (o!=NULL) \
              {PyDict_SetItemString(PyModule_GetDict(m),n,o); Py_DECREF(o);}}
 #endif
 
+
+#ifdef IS_PY3K
+PyMODINIT_FUNC
+#else
 void
+#endif
 _MODULE_NAME (void)
 {
 	PyObject *m;
 
-	ALGtype.ob_type = &PyType_Type;
+#ifdef IS_PY3K
+	/* PyType_Ready automatically fills in ob_type with &PyType_Type if it's not already set */
+	if (PyType_Ready(&ALGtype) < 0)
+		return NULL;
 
 	/* Create the module and add the functions */
+	m = PyModule_Create(&moduledef);
+	if (m == NULL)
+        	return NULL;
+#else
+	ALGtype.ob_type = &PyType_Type;
+	/* Create the module and add the functions */
 	m = Py_InitModule("Crypto.Cipher." _MODULE_STRING, modulemethods);
+#endif
 
 	PyModule_AddIntConstant(m, "MODE_ECB", MODE_ECB);
 	PyModule_AddIntConstant(m, "MODE_CBC", MODE_CBC);
 	PyModule_AddIntConstant(m, "MODE_CFB", MODE_CFB);
-	PyModule_AddIntConstant(m, "MODE_PGP", MODE_PGP);
+	PyModule_AddIntConstant(m, "MODE_PGP", MODE_PGP); /** Vestigial **/
 	PyModule_AddIntConstant(m, "MODE_OFB", MODE_OFB);
 	PyModule_AddIntConstant(m, "MODE_CTR", MODE_CTR);
 	PyModule_AddIntConstant(m, "block_size", BLOCK_SIZE);
@@ -816,6 +813,9 @@ _MODULE_NAME (void)
 	/* Check for errors */
 	if (PyErr_Occurred())
 		Py_FatalError("can't initialize module " _MODULE_STRING);
-}
 
-/* vim:set ts=8 sw=8 sts=0 noexpandtab: */
+#ifdef IS_PY3K
+	return m;
+#endif
+}
+/* vim:set ts=4 sw=4 sts=0 noexpandtab: */
